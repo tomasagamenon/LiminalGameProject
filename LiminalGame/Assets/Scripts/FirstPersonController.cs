@@ -1,6 +1,7 @@
 using UnityEngine;
 #if ENABLE_INPUT_SYSTEM && STARTER_ASSETS_PACKAGES_CHECKED
 using UnityEngine.InputSystem;
+using Cinemachine;
 #endif
 
 namespace StarterAssets
@@ -16,20 +17,18 @@ namespace StarterAssets
 		public float MoveSpeed = 4.0f;
 		[Tooltip("Sprint speed of the character in m/s")]
 		public float SprintSpeed = 6.0f;
+		[Tooltip("Crouch speed of the character in m/s")]
+		public float CrouchSpeed = 2.0f;
 		[Tooltip("Rotation speed of the character")]
 		public float RotationSpeed = 1.0f;
 		[Tooltip("Acceleration and deceleration")]
 		public float SpeedChangeRate = 10.0f;
 
 		[Space(10)]
-		[Tooltip("The height the player can jump")]
-		public float JumpHeight = 1.2f;
 		[Tooltip("The character uses its own gravity value. The engine default is -9.81f")]
 		public float Gravity = -15.0f;
 
 		[Space(10)]
-		[Tooltip("Time required to pass before being able to jump again. Set to 0f to instantly jump again")]
-		public float JumpTimeout = 0.1f;
 		[Tooltip("Time required to pass before entering the fall state. Useful for walking down stairs")]
 		public float FallTimeout = 0.15f;
 
@@ -61,7 +60,6 @@ namespace StarterAssets
 		private float _terminalVelocity = 53.0f;
 
 		// timeout deltatime
-		private float _jumpTimeoutDelta;
 		private float _fallTimeoutDelta;
 
 		private PlayerInput _playerInput;
@@ -69,10 +67,37 @@ namespace StarterAssets
 		private StarterAssetsInputs _input;
 		private GameObject _mainCamera;
 
-		private const float _threshold = 0.01f;
-		
+		private const float _threshold = 0.001f;
+
+		[Header("Camera Bob")]
+		public bool CameraBob = true;
+		private float timer;
+		private float defaultYPos = 0;
+		[SerializeField] private GameObject PlayerCameraRoot;
+		[SerializeField] private float walkBobSpeed;
+		[SerializeField] private float walkBobAmaunt;
+		[SerializeField] private float sprintBobSpeed;
+		[SerializeField] private float sprintBobAmaunt;
+		[SerializeField] private float crouchBobSpeed;
+		[SerializeField] private float crouchBobAmaunt;
+
 		private bool IsCurrentDeviceMouse => _playerInput.currentControlScheme == "KeyboardMouse";
 
+		private Vector3 crouchPos;
+		private Vector3 normalPos;
+
+		[Header("Interact")]
+		public float range;
+		public float angle;
+		public LayerMask mask;
+
+		public bool hide;
+
+		[Header("SeeEnemyEvent")]
+		[SerializeField]
+		private float rangeEnemyEvent;
+		[SerializeField]
+		private float angleEnemyEvent;
 		private void Awake()
 		{
 			// get a reference to our main camera
@@ -80,6 +105,7 @@ namespace StarterAssets
 			{
 				_mainCamera = GameObject.FindGameObjectWithTag("MainCamera");
 			}
+			defaultYPos = PlayerCameraRoot.transform.localPosition.y;
 		}
 
 		private void Start()
@@ -89,15 +115,30 @@ namespace StarterAssets
 			_playerInput = GetComponent<PlayerInput>();
 
 			// reset our timeouts on start
-			_jumpTimeoutDelta = JumpTimeout;
 			_fallTimeoutDelta = FallTimeout;
+			normalPos = PlayerCameraRoot.transform.localPosition;
+			crouchPos = PlayerCameraRoot.transform.localPosition + new Vector3(0, -0.75f, 0);
 		}
 
 		private void Update()
 		{
-			JumpAndGravity();
+			GravityPlayer();
 			GroundedCheck();
 			Move();
+			if (CameraBob)
+				HandleHeadBob();
+			if(_input.interact)
+			{
+				var interactable = FindObjectsOfType<Interactable>();
+				foreach(Interactable interact in interactable)
+					if (IsInSight(interact.transform, range, 0))
+						interact.Interact();
+				_input.interact = false;
+			}
+			var enemysE = FindObjectsOfType<EnemyEvent>();
+			foreach (EnemyEvent enemy in enemysE)
+				if (IsInSight(enemy.transform, rangeEnemyEvent, angleEnemyEvent))
+					enemy.Event();
 		}
 
 		private void LateUpdate()
@@ -137,8 +178,11 @@ namespace StarterAssets
 		private void Move()
 		{
 			// set target speed based on move speed, sprint speed and if sprint is pressed
-			float targetSpeed = _input.sprint ? SprintSpeed : MoveSpeed;
+			float targetSpeed = _input.sprint ? SprintSpeed : _input.crouch ? CrouchSpeed : MoveSpeed;
 
+			if (_input.crouch && !_input.sprint)
+				PlayerCameraRoot.transform.localPosition = crouchPos;
+			else PlayerCameraRoot.transform.localPosition = normalPos;
 			// a simplistic acceleration and deceleration designed to be easy to remove, replace, or iterate upon
 
 			// note: Vector2's == operator uses approximation so is not floating point error prone, and is cheaper than magnitude
@@ -181,7 +225,7 @@ namespace StarterAssets
 			_controller.Move(inputDirection.normalized * (_speed * Time.deltaTime) + new Vector3(0.0f, _verticalVelocity, 0.0f) * Time.deltaTime);
 		}
 
-		private void JumpAndGravity()
+		private void GravityPlayer()
 		{
 			if (Grounded)
 			{
@@ -193,24 +237,10 @@ namespace StarterAssets
 				{
 					_verticalVelocity = -2f;
 				}
-
-				// Jump
-				if (_input.jump && _jumpTimeoutDelta <= 0.0f)
-				{
-					// the square root of H * -2 * G = how much velocity needed to reach desired height
-					_verticalVelocity = Mathf.Sqrt(JumpHeight * -2f * Gravity);
-				}
-
-				// jump timeout
-				if (_jumpTimeoutDelta >= 0.0f)
-				{
-					_jumpTimeoutDelta -= Time.deltaTime;
-				}
 			}
 			else
 			{
 				// reset the jump timeout timer
-				_jumpTimeoutDelta = JumpTimeout;
 
 				// fall timeout
 				if (_fallTimeoutDelta >= 0.0f)
@@ -219,7 +249,6 @@ namespace StarterAssets
 				}
 
 				// if we are not grounded, do not jump
-				_input.jump = false;
 			}
 
 			// apply gravity over time if under terminal (multiply by delta time twice to linearly speed up over time)
@@ -229,11 +258,55 @@ namespace StarterAssets
 			}
 		}
 
-		private static float ClampAngle(float lfAngle, float lfMin, float lfMax)
+		void HandleHeadBob()
+        {
+			if (!Grounded)
+				return;
+			if (Mathf.Abs(_input.move.x) > 0.1f || Mathf.Abs(_input.move.y) > 0.1f)
+            {
+				var playerCameraPos = PlayerCameraRoot.transform.localPosition;
+				var DefaulY = (_input.sprint ? defaultYPos : _input.crouch ? crouchPos.y : defaultYPos);
+				timer += Time.deltaTime * (_input.sprint ? sprintBobSpeed : _input.crouch ? crouchBobSpeed : walkBobSpeed);
+				PlayerCameraRoot.transform.localPosition = new Vector3(
+					playerCameraPos.x, DefaulY + Mathf.Sin(timer) * 
+					(_input.sprint ? sprintBobAmaunt : _input.crouch ? crouchBobAmaunt : walkBobAmaunt)
+					, playerCameraPos.z);
+			}
+        }
+
+        private void OnTriggerEnter(Collider other)
+        {
+			if (other.gameObject.layer == 8)
+				hide = true;
+        }
+
+        private void OnTriggerExit(Collider other)
+		{
+			if (other.gameObject.layer == 8)
+				hide = false;
+		}
+
+        private static float ClampAngle(float lfAngle, float lfMin, float lfMax)
 		{
 			if (lfAngle < -360f) lfAngle += 360f;
 			if (lfAngle > 360f) lfAngle -= 360f;
 			return Mathf.Clamp(lfAngle, lfMin, lfMax);
+		}
+
+		public bool IsInSight(Transform target, float range, float angle)
+		{
+			var pos = FindObjectOfType<Camera>().transform;
+			Vector3 diff = (target.position - pos.position);
+			//A--->B
+			//B-A
+			float distance = diff.magnitude;
+			if (distance > range)
+				return false;
+			if (angle > 0)
+				if (Vector3.Angle(pos.forward, diff) > angle / 2) return false;
+			if (Physics.Raycast(pos.position, pos.up, distance, mask))
+				return false;
+			return true;
 		}
 
 		private void OnDrawGizmosSelected()
@@ -246,6 +319,12 @@ namespace StarterAssets
 
 			// when selected, draw a gizmo in the position of, and matching radius of, the grounded collider
 			Gizmos.DrawSphere(new Vector3(transform.position.x, transform.position.y - GroundedOffset, transform.position.z), GroundedRadius);
+			Gizmos.color = Color.blue;
+			var pos = FindObjectOfType<Camera>().transform;
+			Gizmos.DrawRay(pos.position, pos.forward * range);
+			Gizmos.DrawWireSphere(pos.position, range);
+			Gizmos.DrawRay(pos.position, Quaternion.Euler(0, angle / 2, 0) * pos.forward * range);
+			Gizmos.DrawRay(pos.position, Quaternion.Euler(0, -angle / 2, 0) * pos.forward * range);
 		}
 	}
 }

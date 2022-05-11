@@ -12,9 +12,14 @@ namespace StarterAssets
 		public Vector2 look;
 		public bool jump;
 		public bool sprint;
+		public bool crouch;
+		public bool interact;
 
 		[Header("Movement Settings")]
 		public bool analogMovement;
+
+		[Header("Menu")]
+		public MainMenu menu;
 
 #if !UNITY_IOS || !UNITY_ANDROID
 		[Header("Mouse Cursor Settings")]
@@ -45,6 +50,20 @@ namespace StarterAssets
 		{
 			SprintInput(value.isPressed);
 		}
+
+		public void OnCrouch(InputValue value)
+		{
+			CrouchInput(value.isPressed);
+		}
+
+		public void OnInteract(InputValue value)
+		{
+			InteractInput(value.isPressed);
+		}
+		public void OnMenu(InputValue value)
+        {
+			menu.ToggleMenu();
+        }
 #else
 	// old input sys if we do decide to have it (most likely wont)...
 #endif
@@ -68,6 +87,16 @@ namespace StarterAssets
 		public void SprintInput(bool newSprintState)
 		{
 			sprint = newSprintState;
+		}
+
+		public void InteractInput(bool newInteractState)
+		{
+			interact = newInteractState;
+		}
+
+		public void CrouchInput(bool newCrouchState)
+		{
+			crouch = newCrouchState;
 		}
 
 #if !UNITY_IOS || !UNITY_ANDROID
